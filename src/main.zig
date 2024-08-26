@@ -9,10 +9,6 @@ const process = std.process;
 const ArrayList = std.ArrayList;
 const debugPrint = std.debug.print;
 
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-const allocator = gpa.allocator();
-var E: EditorConfig = undefined;
-
 const EditorError = error{
     Err_tcgetattr,
     Err_tcsetattr,
@@ -21,7 +17,7 @@ const EditorError = error{
 };
 
 const Erow: type = struct { // Editor Row
-    size: u16,
+    size: usize,
     chars: []u8,
 };
 
@@ -34,6 +30,10 @@ const EditorConfig: type = struct {
     row: ArrayList(Erow),
     orig_termios: c.termios,
 };
+
+var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+const allocator = gpa.allocator();
+var E: EditorConfig = undefined;
 
 fn disableRawMode() !void {
     if (c.tcsetattr(c.STDIN_FILENO, c.TCSA.FLUSH, &E.orig_termios) == -1)
@@ -132,10 +132,10 @@ fn editorMoveCursor(key: u8) void {
 fn editorDrawRows(buf: *ArrayList(u8)) !void {
     for (0..E.screenrows) |i| {
         if (i < E.numrows) {
-            var len = E.row.size;
+            var len = E.row.items[i].size;
             if (len > E.screencols)
                 len = E.screencols;
-            try buf.appendSlice(E.row.chars[0..len]);
+            try buf.appendSlice(E.row.items[i].chars[0..len]);
         } else {
             try buf.append('~');
         }
@@ -147,13 +147,15 @@ fn editorDrawRows(buf: *ArrayList(u8)) !void {
 }
 
 fn editorOpen(filename: []u8) !void {
+    debugPrint("opening: {s}\n", .{filename});
     const file = try fs.cwd().openFile(filename, .{});
     var buf: [0x1000]u8 = undefined;
     const line = try file.reader().readUntilDelimiterOrEof(&buf, '\n');
     if (line == null)
         return EditorError.Err_open;
 
-    editorAppendRow(line, line.?.len);
+    E.row = ArrayList(Erow).init(allocator);
+    try editorAppendRow(line.?, line.?.len);
 }
 
 fn initEditor() i8 {
@@ -163,11 +165,15 @@ fn initEditor() i8 {
     return getWindowSize(&E.screenrows, &E.screencols);
 }
 
-fn editorAppendRow(s: []u8, len: usize) void {
-    E.row.size = len;
-    E.row.chars = try allocator.alloc(u8, len);
-    @memcpy(E.row.chars, s);
-    E.numrows = 1;
+fn editorAppendRow(s: []u8, len: usize) !void {
+    // const at: usize = @intCast(E.numrows);
+    const row = Erow{
+        .size = len,
+        .chars = try allocator.alloc(u8, len),
+    };
+    @memcpy(row.chars, s);
+    try E.row.append(row);
+    E.numrows += 1;
 }
 
 pub fn main() !void {
@@ -184,7 +190,11 @@ pub fn main() !void {
 
     const filename: []u8 = args[1];
     try editorOpen(filename);
-    defer allocator.free(E.row.chars);
+    defer {
+        for (E.row.items) |row|
+            allocator.free(row.chars);
+        E.row.deinit();
+    }
 
     while (true) {
         try editorRefreshScreen();
